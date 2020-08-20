@@ -49,9 +49,11 @@ public class NfsFileSystem extends FileSystem {
     private long lastUpdate;
     private int slotId = -1;
     private Path root;
+    private final FileSystemProvider provider;
     private final ScheduledExecutorService executorService = Executors.newScheduledThreadPool(1);
 
-    NfsFileSystem(URI server) throws IOException {
+    NfsFileSystem(FileSystemProvider provider,  URI server) throws IOException {
+        this.provider = provider;
         HostAndPort hp = HostAndPort.fromString(server.getHost())
                 .withDefaultPort(2049)
                 .requireBracketsForIPv6();
@@ -67,7 +69,7 @@ public class NfsFileSystem extends FileSystem {
 
     @Override
     public FileSystemProvider provider() {
-        throw new UnsupportedOperationException("Not supported yet."); //To change body of generated methods, choose Tools | Templates.
+        return provider;
     }
 
     @Override

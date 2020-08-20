@@ -31,7 +31,7 @@ public class NfsFileSystemProvider extends FileSystemProvider {
 
     @Override
     public FileSystem newFileSystem(URI uri, Map<String, ?> env) throws IOException {
-        return new NfsFileSystem(uri);
+        return new NfsFileSystem(this, uri);
     }
 
     @Override
