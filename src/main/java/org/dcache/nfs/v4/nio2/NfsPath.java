@@ -5,14 +5,12 @@ import com.google.common.io.BaseEncoding;
 import java.io.File;
 import java.io.IOException;
 import java.net.URI;
-import java.nio.file.FileSystem;
 import java.nio.file.InvalidPathException;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.WatchEvent;
 import java.nio.file.WatchKey;
 import java.nio.file.WatchService;
-import java.util.Iterator;
 import org.dcache.nfs.v4.xdr.nfs_fh4;
 
 /**
@@ -35,13 +33,13 @@ public class NfsPath implements Path {
     }
 
     @Override
-    public FileSystem getFileSystem() {
+    public NfsFileSystem getFileSystem() {
         return fs;
     }
 
     @Override
     public boolean isAbsolute() {
-        return true;
+        return false;
     }
 
     @Override
@@ -174,4 +172,9 @@ public class NfsPath implements Path {
                 .omitNullValues()
                 .toString();
     }
+
+    nfs_fh4 fh() {
+        return fh;
+    }
+
 }
