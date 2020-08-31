@@ -20,7 +20,6 @@ import java.util.Date;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
-import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -174,8 +173,9 @@ public class NfsFileSystem extends FileSystem {
 
     private void exchange_id() throws OncRpcException, IOException {
 
+        String id = this.getClass().getCanonicalName() + "-" + Runtime.version().toString() + " " + InetAddress.getLocalHost().getHostName();
         COMPOUND4args args = new CompoundBuilder()
-                .withExchangeId("", NfsFileSystem.class.getName(), UUID.randomUUID().toString(), 0, state_protect_how4.SP4_NONE)
+                .withExchangeId(this.getClass().getPackageName(), NfsFileSystem.class.getName(), id, 0, state_protect_how4.SP4_NONE)
                 .withTag("exchange_id")
                 .build();
 
