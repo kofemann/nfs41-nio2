@@ -15,6 +15,8 @@ import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileAttribute;
 import java.nio.file.attribute.FileAttributeView;
 import java.nio.file.spi.FileSystemProvider;
+import java.util.Arrays;
+import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
 
@@ -51,7 +53,25 @@ public class NfsFileSystemProvider extends FileSystemProvider {
 
     @Override
     public DirectoryStream<Path> newDirectoryStream(Path dir, DirectoryStream.Filter<? super Path> filter) throws IOException {
-        throw new UnsupportedOperationException("Not supported yet."); //To change body of generated methods, choose Tools | Templates.
+
+        NfsPath nfsDir = (NfsPath)dir;
+
+        NfsFileSystem nfs = nfsDir.getFileSystem();
+        Path[] list = nfs.list(nfsDir);
+
+        return new DirectoryStream<Path>() {
+
+            @Override
+            public Iterator<Path> iterator() {
+                return Arrays.asList(list).iterator();
+            }
+
+            @Override
+            public void close() throws IOException {
+                // NOP
+            }
+        };
+
     }
 
     @Override

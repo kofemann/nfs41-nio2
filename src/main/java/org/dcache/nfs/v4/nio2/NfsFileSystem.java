@@ -3,8 +3,10 @@ package org.dcache.nfs.v4.nio2;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.net.HostAndPort;
 import java.io.IOException;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.FileStore;
 import java.nio.file.FileSystem;
 import java.nio.file.Path;
@@ -12,29 +14,46 @@ import java.nio.file.PathMatcher;
 import java.nio.file.WatchService;
 import java.nio.file.attribute.UserPrincipalLookupService;
 import java.nio.file.spi.FileSystemProvider;
+import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Date;
+import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import javax.security.auth.Subject;
+import org.dcache.auth.Subjects;
+import org.dcache.nfs.ChimeraNFSException;
 import org.dcache.nfs.nfsstat;
+import org.dcache.nfs.util.UnixUtils;
 import org.dcache.nfs.v4.AttributeMap;
-import org.dcache.nfs.v4.client.CompoundBuilder;
-import org.dcache.nfs.v4.client.nfs4_prot_NFS4_PROGRAM_Client;
+import org.dcache.nfs.v4.ClientSession;
+import org.dcache.nfs.v4.CompoundBuilder;
 import org.dcache.nfs.v4.xdr.COMPOUND4args;
 import org.dcache.nfs.v4.xdr.COMPOUND4res;
+import org.dcache.nfs.v4.xdr.SEQUENCE4args;
 import org.dcache.nfs.v4.xdr.clientid4;
+import org.dcache.nfs.v4.xdr.entry4;
 import org.dcache.nfs.v4.xdr.fattr4_lease_time;
 import org.dcache.nfs.v4.xdr.nfs4_prot;
+import org.dcache.nfs.v4.xdr.nfs_argop4;
 import org.dcache.nfs.v4.xdr.nfs_fh4;
 import org.dcache.nfs.v4.xdr.nfs_opnum4;
 import org.dcache.nfs.v4.xdr.nfstime4;
 import org.dcache.nfs.v4.xdr.sequenceid4;
 import org.dcache.nfs.v4.xdr.sessionid4;
+import org.dcache.nfs.v4.xdr.slotid4;
 import org.dcache.nfs.v4.xdr.state_protect_how4;
+import org.dcache.nfs.v4.xdr.verifier4;
+import org.dcache.oncrpc4j.rpc.OncRpcClient;
 import org.dcache.oncrpc4j.rpc.OncRpcException;
+import org.dcache.oncrpc4j.rpc.RpcAuth;
+import org.dcache.oncrpc4j.rpc.RpcAuthTypeUnix;
+import org.dcache.oncrpc4j.rpc.RpcCall;
+import org.dcache.oncrpc4j.rpc.RpcTransport;
 import org.dcache.oncrpc4j.rpc.net.IpProtocolType;
 
 /**
@@ -42,14 +61,17 @@ import org.dcache.oncrpc4j.rpc.net.IpProtocolType;
  */
 public class NfsFileSystem extends FileSystem {
 
-    private final nfs4_prot_NFS4_PROGRAM_Client nfsClient;
+    private final RpcCall client;
+    private final OncRpcClient rpcClient;
+
     private clientid4 _clientIdByServer = null;
     private sequenceid4 _sequenceID = null;
     private sessionid4 _sessionid = null;
     private long lastUpdate;
-    private int slotId = -1;
-    private Path root;
+    private NfsPath root;
     private final FileSystemProvider provider;
+    private ClientSession clientSession;
+
     private final ScheduledExecutorService executorService = Executors.newScheduledThreadPool(1);
 
     NfsFileSystem(FileSystemProvider provider,  URI server) throws IOException {
@@ -58,12 +80,29 @@ public class NfsFileSystem extends FileSystem {
                 .withDefaultPort(2049)
                 .requireBracketsForIPv6();
 
+
+        Subject currentUser = UnixUtils.getCurrentUser();
+        if (currentUser == null) {
+            throw new IllegalStateException("unable to determine current unix user. please provide uid/gid explicitly");
+        }
+
+        int uid = (int) Subjects.getUid(currentUser);
+        int gid = (int) Subjects.getPrimaryGid(currentUser);
+        int[] gids = UnixUtils.toIntArray(Subjects.getGids(currentUser));
+
         InetSocketAddress address = new InetSocketAddress(hp.getHost(), hp.getPort());
-        nfsClient = new nfs4_prot_NFS4_PROGRAM_Client(address.getAddress(),
-                address.getPort(), IpProtocolType.TCP);
+        rpcClient = new OncRpcClient(address.getAddress(), IpProtocolType.TCP, address.getPort());
+        RpcTransport transport;
+        transport = rpcClient.connect();
+
+        RpcAuth credential = new RpcAuthTypeUnix(uid, gid, gids,
+                (int) Instant.now().getEpochSecond(),
+                InetAddress.getLocalHost().getHostName());
+        client = new RpcCall(100003, 4, credential, transport);
 
         exchange_id();
         create_session();
+        reclaim_complete();
         getRootFh(server.getPath());
     }
 
@@ -80,7 +119,7 @@ public class NfsFileSystem extends FileSystem {
 
     @Override
     public boolean isOpen() {
-        return nfsClient.getTransport().isOpen();
+        return client.getTransport().isOpen();
     }
 
     @Override
@@ -156,18 +195,66 @@ public class NfsFileSystem extends FileSystem {
 
     }
 
+    private COMPOUND4res sendCompoundInSession(COMPOUND4args compound4args)
+            throws OncRpcException, IOException {
+
+        if (compound4args.argarray[0].argop == nfs_opnum4.OP_SEQUENCE) {
+            throw new IllegalArgumentException();
+        }
+
+        nfs_argop4[] extendedOps = new nfs_argop4[compound4args.argarray.length + 1];
+        System.arraycopy(compound4args.argarray, 0, extendedOps, 1, compound4args.argarray.length);
+        compound4args.argarray = extendedOps;
+
+        ClientSession.SessionSlot slot = clientSession.acquireSlot();
+        try {
+
+            COMPOUND4res compound4res = new COMPOUND4res();
+            /*
+             * wait if server is in the grace period.
+             *
+             * TODO: escape if it takes too long
+             */
+            do {
+
+                nfs_argop4 op = new nfs_argop4();
+                op.argop = nfs_opnum4.OP_SEQUENCE;
+                op.opsequence = new SEQUENCE4args();
+                op.opsequence.sa_cachethis = false;
+
+                op.opsequence.sa_slotid = slot.getId();
+                op.opsequence.sa_highest_slotid = new slotid4(clientSession.maxRequests() - 1);
+                op.opsequence.sa_sequenceid = slot.nextSequenceId();
+                op.opsequence.sa_sessionid = clientSession.sessionId();
+
+                compound4args.argarray[0] = op;
+
+                client.call(nfs4_prot.NFSPROC4_COMPOUND_4, compound4args, compound4res);
+                lastUpdate = System.currentTimeMillis();
+
+                if (compound4res.status == nfsstat.NFSERR_GRACE) {
+                    System.out.println("Server in GRACE period....retry");
+                }
+            } while (compound4res.status == nfsstat.NFSERR_GRACE);
+
+            nfsstat.throwIfNeeded(compound4res.status);
+            return compound4res;
+        } finally {
+            clientSession.releaseSlot(slot);
+        }
+    }
+
     private COMPOUND4res sendCompound(COMPOUND4args compound4args)
             throws OncRpcException, IOException {
 
-        COMPOUND4res compound4res;
+        COMPOUND4res compound4res = new COMPOUND4res();
         /*
-         * wail if server is in the grace period.
+         * wait if server is in the grace period.
          *
          * TODO: escape if it takes too long
          */
         do {
-            compound4res = nfsClient.NFSPROC4_COMPOUND_4(compound4args);
-            processSequence(compound4res);
+            client.call(nfs4_prot.NFSPROC4_COMPOUND_4, compound4args, compound4res);
             if (compound4res.status == nfsstat.NFSERR_GRACE) {
                 System.out.println("Server in GRACE period....retry");
             }
@@ -186,31 +273,43 @@ public class NfsFileSystem extends FileSystem {
 
         COMPOUND4res compound4res = sendCompound(args);
 
+        _sequenceID.value++;
         _sessionid = compound4res.resarray.get(0).opcreate_session.csr_resok4.csr_sessionid;
-        _sequenceID.value = 0;
-        slotId = compound4res.resarray.get(0).opcreate_session.csr_resok4.csr_fore_chan_attrs.ca_maxrequests.value - 1;
+        int maxRequests = compound4res.resarray.get(0).opcreate_session.csr_resok4.csr_fore_chan_attrs.ca_maxrequests.value;
+        clientSession = new ClientSession(_sessionid, maxRequests);
 
         args = new CompoundBuilder()
-                .withSequence(false, _sessionid, _sequenceID.value, slotId, 0)
                 .withPutrootfh()
                 .withGetattr(nfs4_prot.FATTR4_LEASE_TIME)
                 .withTag("get_lease_time")
                 .build();
 
-            compound4res = sendCompound(args);
+        compound4res = sendCompoundInSession(args);
 
-            AttributeMap attributeMap = new AttributeMap(compound4res.resarray.get(compound4res.resarray.size() - 1).opgetattr.resok4.obj_attributes);
-            Optional<fattr4_lease_time> fattr4_lease_timeAttr = attributeMap.get(nfs4_prot.FATTR4_LEASE_TIME);
-            int leaseTimeInSeconds = fattr4_lease_timeAttr.get().value;
+        AttributeMap attributeMap = new AttributeMap(compound4res.resarray.get(compound4res.resarray.size() - 1).opgetattr.resok4.obj_attributes);
+        Optional<fattr4_lease_time> fattr4_lease_timeAttr = attributeMap.get(nfs4_prot.FATTR4_LEASE_TIME);
+        int leaseTimeInSeconds = fattr4_lease_timeAttr.get().value;
 
         executorService.scheduleAtFixedRate(() -> {
             try {
-                sequence();
+                sendCompoundInSession(new CompoundBuilder()
+                        .withTag("renew")
+                        .build());
             } catch (IOException e) {
             }
         },
                  leaseTimeInSeconds, leaseTimeInSeconds, TimeUnit.SECONDS
         );
+    }
+
+    private void reclaim_complete() throws IOException {
+        COMPOUND4args args = new CompoundBuilder()
+                .withReclaimComplete()
+                .withTag("reclaim_complete")
+                .build();
+
+        @SuppressWarnings("unused")
+        COMPOUND4res compound4res = sendCompoundInSession(args);
     }
 
     private void destroy_session() throws OncRpcException, IOException {
@@ -233,54 +332,71 @@ public class NfsFileSystem extends FileSystem {
                 .build();
         @SuppressWarnings("unused")
         COMPOUND4res compound4res = sendCompound(args);
-        nfsClient.close();
+        rpcClient.close();
 
     }
 
     private void getRootFh(String path) throws OncRpcException, IOException {
 
         COMPOUND4args args = new CompoundBuilder()
-                .withSequence(false, _sessionid, _sequenceID.value, slotId, 0)
                 .withPutrootfh()
                 .withLookup(path)
                 .withGetfh()
                 .withTag("get_rootfh")
                 .build();
 
-        COMPOUND4res compound4res = sendCompound(args);
+        COMPOUND4res compound4res = sendCompoundInSession(args);
 
         nfs_fh4 fh = compound4res.resarray.get(compound4res.resarray.size() - 1).opgetfh.resok4.object;
         root = new NfsPath(this, fh, null, null, null);
     }
 
-    private void sequence() throws OncRpcException, IOException {
-
-        COMPOUND4args args = new CompoundBuilder()
-                .withSequence(false, _sessionid, _sequenceID.value, slotId, 0)
-                .withTag("sequence")
-                .build();
-        COMPOUND4res compound4res = sendCompound(args);
-    }
-
     nfs_fh4 lookup(nfs_fh4 fh, String path) throws OncRpcException, IOException {
 
         COMPOUND4args args = new CompoundBuilder()
-                .withSequence(false, _sessionid, _sequenceID.value, slotId, 0)
                 .withPutfh(fh)
                 .withLookup(path)
                 .withGetfh()
                 .withTag("lookup")
                 .build();
 
-        COMPOUND4res compound4res = sendCompound(args);
+        COMPOUND4res compound4res = sendCompoundInSession(args);
         return compound4res.resarray.get(compound4res.resarray.size() - 1).opgetfh.resok4.object;
     }
 
-    public void processSequence(COMPOUND4res compound4res) {
 
-        if (compound4res.resarray.get(0).resop == nfs_opnum4.OP_SEQUENCE && compound4res.resarray.get(0).opsequence.sr_status == nfsstat.NFS_OK) {
-            lastUpdate = System.currentTimeMillis();
-            ++_sequenceID.value;
-        }
+    Path[] list(NfsPath dir) throws OncRpcException, IOException, ChimeraNFSException {
+
+        boolean done;
+        List<Path> list = new ArrayList<>();
+        long cookie = 0;
+        verifier4 verifier = new verifier4(new byte[nfs4_prot.NFS4_VERIFIER_SIZE]);
+
+        do {
+
+            COMPOUND4args args = new CompoundBuilder()
+                    .withPutfh(dir.fh())
+                    .withReaddir(cookie, verifier, 16384, 16384, nfs4_prot.FATTR4_FILEHANDLE)
+                    .withTag("readdir")
+                    .build();
+
+            COMPOUND4res compound4res = sendCompoundInSession(args);
+
+            verifier = compound4res.resarray.get(2).opreaddir.resok4.cookieverf;
+            done = compound4res.resarray.get(2).opreaddir.resok4.reply.eof;
+
+            entry4 dirEntry = compound4res.resarray.get(2).opreaddir.resok4.reply.entries;
+            while (dirEntry != null) {
+                cookie = dirEntry.cookie.value;
+
+                AttributeMap attrs = new AttributeMap(dirEntry.attrs);
+                Optional<nfs_fh4> fh = attrs.get(nfs4_prot.FATTR4_FILEHANDLE);
+                list.add(new NfsPath(this, fh.get(), root, dir, new String(dirEntry.name.value, StandardCharsets.UTF_8)));
+                dirEntry = dirEntry.nextentry;
+            }
+
+        } while (!done);
+
+        return list.toArray(new Path[list.size()]);
     }
 }
