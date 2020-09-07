@@ -176,8 +176,7 @@ public class NfsFileSystem extends FileSystem {
         String id = this.getClass().getCanonicalName() + ": "
                 + ProcessHandle.current().info().user().orElse("<nobody>")
                 + "-"
-                + ProcessHandle.current().pid()
-                + " on " + InetAddress.getLocalHost().getHostName();
+                + ProcessHandle.current().pid() + "@" + InetAddress.getLocalHost().getHostName();
 
         COMPOUND4args args = new CompoundBuilder()
                 .withExchangeId(this.getClass().getPackageName(), NfsFileSystem.class.getName(), id, 0, state_protect_how4.SP4_NONE)
