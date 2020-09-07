@@ -47,6 +47,7 @@ import org.dcache.nfs.v4.xdr.sequenceid4;
 import org.dcache.nfs.v4.xdr.sessionid4;
 import org.dcache.nfs.v4.xdr.slotid4;
 import org.dcache.nfs.v4.xdr.state_protect_how4;
+import org.dcache.nfs.v4.xdr.utf8str_cs;
 import org.dcache.nfs.v4.xdr.verifier4;
 import org.dcache.oncrpc4j.rpc.OncRpcClient;
 import org.dcache.oncrpc4j.rpc.OncRpcException;
@@ -55,11 +56,15 @@ import org.dcache.oncrpc4j.rpc.RpcAuthTypeUnix;
 import org.dcache.oncrpc4j.rpc.RpcCall;
 import org.dcache.oncrpc4j.rpc.RpcTransport;
 import org.dcache.oncrpc4j.rpc.net.IpProtocolType;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  *
  */
 public class NfsFileSystem extends FileSystem {
+
+    private final static Logger LOGGER = LoggerFactory.getLogger(NfsFileSystem.class);
 
     private final RpcCall client;
     private final OncRpcClient rpcClient;
@@ -189,10 +194,10 @@ public class NfsFileSystem extends FileSystem {
         if (compound4res.resarray.get(0).opexchange_id.eir_resok4.eir_server_impl_id.length > 0) {
             String serverId = compound4res.resarray.get(0).opexchange_id.eir_resok4.eir_server_impl_id[0].nii_name.toString();
             nfstime4 buildTime = compound4res.resarray.get(0).opexchange_id.eir_resok4.eir_server_impl_id[0].nii_date;
-            System.out.println("Connected to: " + serverId + ", built at: "
+            LOGGER.debug("Connected to: {}, built at: {}", serverId
                     + (buildTime.seconds > 0 ? new Date(buildTime.seconds * 1000) : "<Unknon>"));
         } else {
-            System.out.println("Connected to: Mr. X");
+            LOGGER.debug("Connected to: Mr. X");
         }
 
         _clientIdByServer = compound4res.resarray.get(0).opexchange_id.eir_resok4.eir_clientid;
@@ -237,7 +242,7 @@ public class NfsFileSystem extends FileSystem {
                 client.call(nfs4_prot.NFSPROC4_COMPOUND_4, compound4args, compound4res);
                 lastUpdate = System.currentTimeMillis();
 
-            } while (canRetry(compound4res.status, compound4args.tag.toString()));
+            } while (canRetry(compound4res.status, compound4args.tag));
 
             nfsstat.throwIfNeeded(compound4res.status);
             return compound4res;
@@ -257,20 +262,20 @@ public class NfsFileSystem extends FileSystem {
          */
         do {
             client.call(nfs4_prot.NFSPROC4_COMPOUND_4, compound4args, compound4res);
-        } while (canRetry(compound4res.status, compound4args.tag.toString()));
+        } while (canRetry(compound4res.status, compound4args.tag));
 
         nfsstat.throwIfNeeded(compound4res.status);
         return compound4res;
     }
 
 
-    private boolean canRetry(int status, String compound) {
+    private boolean canRetry(int status, utf8str_cs compound) {
         switch (status) {
 
             case nfsstat.NFSERR_DELAY:
             case nfsstat.NFSERR_LAYOUTTRYLATER:
             case nfsstat.NFSERR_GRACE:
-                System.out.println("Retrying " + compound + " on " + nfsstat.toString(status));
+                LOGGER.debug("Retrying {} on {}", compound, nfsstat.toString(status));
                 try {
                     TimeUnit.SECONDS.sleep(ThreadLocalRandom.current().nextInt(5));
                 } catch (InterruptedException e) {
