@@ -22,6 +22,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import javax.security.auth.Subject;
 import org.dcache.auth.Subjects;
@@ -236,10 +237,7 @@ public class NfsFileSystem extends FileSystem {
                 client.call(nfs4_prot.NFSPROC4_COMPOUND_4, compound4args, compound4res);
                 lastUpdate = System.currentTimeMillis();
 
-                if (compound4res.status == nfsstat.NFSERR_GRACE) {
-                    System.out.println("Server in GRACE period....retry");
-                }
-            } while (compound4res.status == nfsstat.NFSERR_GRACE);
+            } while (canRetry(compound4res.status, compound4args.tag.toString()));
 
             nfsstat.throwIfNeeded(compound4res.status);
             return compound4res;
@@ -259,13 +257,31 @@ public class NfsFileSystem extends FileSystem {
          */
         do {
             client.call(nfs4_prot.NFSPROC4_COMPOUND_4, compound4args, compound4res);
-            if (compound4res.status == nfsstat.NFSERR_GRACE) {
-                System.out.println("Server in GRACE period....retry");
-            }
-        } while (compound4res.status == nfsstat.NFSERR_GRACE);
+        } while (canRetry(compound4res.status, compound4args.tag.toString()));
 
         nfsstat.throwIfNeeded(compound4res.status);
         return compound4res;
+    }
+
+
+    private boolean canRetry(int status, String compound) {
+        switch (status) {
+
+            case nfsstat.NFSERR_DELAY:
+            case nfsstat.NFSERR_LAYOUTTRYLATER:
+            case nfsstat.NFSERR_GRACE:
+                System.out.println("Retrying " + compound + " on " + nfsstat.toString(status));
+                try {
+                    TimeUnit.SECONDS.sleep(ThreadLocalRandom.current().nextInt(5));
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return false;
+                }
+                return true;
+            default:
+                return false;
+
+        }
     }
 
     private void create_session() throws OncRpcException, IOException {
