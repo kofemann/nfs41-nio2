@@ -68,7 +68,6 @@ public class NfsFileSystem extends FileSystem {
 
     private clientid4 _clientIdByServer = null;
     private sequenceid4 _sequenceID = null;
-    private sessionid4 _sessionid = null;
     private long lastUpdate;
     private NfsPath root;
     private final FileSystemProvider provider;
@@ -285,9 +284,9 @@ public class NfsFileSystem extends FileSystem {
         COMPOUND4res compound4res = sendCompound(args);
 
         _sequenceID.value++;
-        _sessionid = compound4res.resarray.get(0).opcreate_session.csr_resok4.csr_sessionid;
+        sessionid4 sessionid = compound4res.resarray.get(0).opcreate_session.csr_resok4.csr_sessionid;
         int maxRequests = compound4res.resarray.get(0).opcreate_session.csr_resok4.csr_fore_chan_attrs.ca_maxrequests.value;
-        clientSession = new ClientSession(_sessionid, maxRequests);
+        clientSession = new ClientSession(sessionid, maxRequests);
 
         args = new CompoundBuilder()
                 .withPutrootfh()
@@ -326,7 +325,7 @@ public class NfsFileSystem extends FileSystem {
     private void destroy_session() throws OncRpcException, IOException {
 
         COMPOUND4args args = new CompoundBuilder()
-                .withDestroysession(_sessionid)
+                .withDestroysession(clientSession.sessionId())
                 .withTag("destroy_session")
                 .build();
 
