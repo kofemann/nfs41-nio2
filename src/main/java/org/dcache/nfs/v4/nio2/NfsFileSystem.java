@@ -14,7 +14,6 @@ import java.nio.file.PathMatcher;
 import java.nio.file.WatchService;
 import java.nio.file.attribute.UserPrincipalLookupService;
 import java.nio.file.spi.FileSystemProvider;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
@@ -24,11 +23,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
-import javax.security.auth.Subject;
-import org.dcache.auth.Subjects;
+
 import org.dcache.nfs.ChimeraNFSException;
 import org.dcache.nfs.nfsstat;
-import org.dcache.nfs.util.UnixUtils;
 import org.dcache.nfs.v4.AttributeMap;
 import org.dcache.nfs.v4.ClientSession;
 import org.dcache.nfs.v4.CompoundBuilder;
@@ -86,23 +83,12 @@ public class NfsFileSystem extends FileSystem {
                 .requireBracketsForIPv6();
 
 
-        Subject currentUser = UnixUtils.getCurrentUser();
-        if (currentUser == null) {
-            throw new IllegalStateException("unable to determine current unix user. please provide uid/gid explicitly");
-        }
-
-        int uid = (int) Subjects.getUid(currentUser);
-        int gid = (int) Subjects.getPrimaryGid(currentUser);
-        int[] gids = UnixUtils.toIntArray(Subjects.getGids(currentUser));
-
         InetSocketAddress address = new InetSocketAddress(hp.getHost(), hp.getPort());
         rpcClient = new OncRpcClient(address.getAddress(), IpProtocolType.TCP, address.getPort());
         RpcTransport transport;
         transport = rpcClient.connect();
 
-        RpcAuth credential = new RpcAuthTypeUnix(uid, gid, gids,
-                (int) Instant.now().getEpochSecond(),
-                InetAddress.getLocalHost().getHostName());
+        RpcAuth credential = RpcAuthTypeUnix.ofCurrentUnixUser();
         client = new RpcCall(100003, 4, credential, transport);
 
         exchange_id();
